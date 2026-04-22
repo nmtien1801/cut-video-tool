@@ -1,0 +1,62 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+.env/
+.env.*
+
+# =========================
+# Build / Distribution
+# =========================
+build/
+dist/
+*.spec
+
+# PyInstaller
+*.exe
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# FFmpeg (nếu bạn không muốn push)
+# =========================
+bin/ffmpeg.exe
+
+# hoặc nếu muốn giữ folder nhưng bỏ file trong đó
+# bin/*
+# !bin/.gitkeep
+
+# =========================
+# User data / output
+# =========================
+Downloads/
+output/
+*.mp4
+*.avi
+*.mov
+
+# =========================
+# Secrets
+# =========================
+.env
+config.json
