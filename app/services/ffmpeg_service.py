@@ -12,6 +12,7 @@ Tại sao dùng mảng thay vì shell=True?
 """
 import subprocess
 import re
+import os
 from typing import Callable
 
 from app.config import FFMPEG_BIN, FFPROBE_BIN
@@ -36,6 +37,10 @@ def get_video_info(input_path: str) -> dict:
     Trả về dict: { duration: float, has_audio: bool }
     Dùng ffprobe với args mảng.
     """
+    kwargs = {}
+    if hasattr(subprocess, 'CREATE_NO_WINDOW'):
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+
     args = [
         FFPROBE_BIN,
         "-v", "error",
@@ -43,7 +48,10 @@ def get_video_info(input_path: str) -> dict:
         "-of", "default=noprint_wrappers=1",
         input_path,
     ]
-    result = subprocess.run(args, capture_output=True, text=True)
+    result = subprocess.run(
+        args, capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, **kwargs
+    )
     output = result.stdout + result.stderr
 
     duration = 0.0
@@ -77,11 +85,16 @@ def run_ffmpeg(
     # Thêm binary vào đầu
     full_args = [FFMPEG_BIN] + args
 
+    kwargs = {}
+    if hasattr(subprocess, 'CREATE_NO_WINDOW'):
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+
     proc = subprocess.Popen(
         full_args,
-        stdout=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,   # ffmpeg log ra stderr
-        # shell=False (mặc định) — QUAN TRỌNG trên Windows
+        **kwargs
     )
 
     stderr_lines = []

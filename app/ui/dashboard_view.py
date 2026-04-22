@@ -124,7 +124,7 @@ class DashboardWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(1000, 650)
+        self.setMinimumSize(1200, 750)
 
         self._input_path:     str | None = None
         self._video_duration: float      = 0.0

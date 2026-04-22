@@ -126,7 +126,7 @@ def export_blur(
         ]
 
         if has_audio:
-            args += ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k"]
+            args += ["-map", "0:a?", "-c:a", "aac", "-b:a", "192k"]
 
         args += [
             "-c:v",     "libx264",
