@@ -50,7 +50,8 @@ def trim_segments(
             "-t",  f"{seg.duration:.3f}",
             "-i",  input_path,
             "-c",  "copy",
-            "-map", "0",
+            "-map", "0:v",
+            "-map", "0:a?",
             "-movflags", "+faststart",
             out_path,
         ]
@@ -104,9 +105,8 @@ def export_blur(
         f"[bg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
         f"crop={out_w}:{out_h},"
         f"boxblur=20:10[bg_blur];"
-        f"[fg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
-        f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:black@0[fg_pad];"
-        f"[bg_blur][fg_pad]overlay=0:0[outv]"
+        f"[fg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fg_scaled];"
+        f"[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2[outv]"
     )
 
     total = len(segments)
@@ -130,8 +130,9 @@ def export_blur(
 
         args += [
             "-c:v",     "libx264",
-            "-preset",  "superfast",
-            "-crf",     "22",
+            "-preset",  "ultrafast",
+            "-threads", "0",
+            "-crf",     "23",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             out_path,
