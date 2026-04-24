@@ -52,6 +52,7 @@ def trim_segments(
             "-c",  "copy",
             "-map", "0:v",
             "-map", "0:a?",
+            "-avoid_negative_ts", "make_non_negative",
             "-movflags", "+faststart",
             out_path,
         ]
@@ -89,6 +90,10 @@ def export_blur(
     out_h = 1920 if aspect_ratio == "9:16" else 1080
     ratio_tag = aspect_ratio.replace(":", "x")
 
+    # Tối ưu tốc độ: Thu nhỏ ảnh nền trước khi áp dụng bộ lọc blur
+    bg_w = out_w // 4
+    bg_h = out_h // 4
+
     output_dir = os.path.join(
         DOWNLOADS_DIR, f"Creatimic_{ratio_tag}_{int(time.time())}"
     )
@@ -102,9 +107,9 @@ def export_blur(
     # nối bằng ";" rồi truyền là 1 phần tử mảng riêng biệt
     filter_complex = (
         f"[0:v]split=2[bg_in][fg_in];"
-        f"[bg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{out_h},"
-        f"boxblur=20:10[bg_blur];"
+        f"[bg_in]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,"
+        f"crop={bg_w}:{bg_h},"
+        f"boxblur=10:5,scale={out_w}:{out_h}[bg_blur];"
         f"[fg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fg_scaled];"
         f"[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2[outv]"
     )

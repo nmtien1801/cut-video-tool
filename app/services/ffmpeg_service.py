@@ -44,7 +44,7 @@ def get_video_info(input_path: str) -> dict:
     args = [
         FFPROBE_BIN,
         "-v", "error",
-        "-show_entries", "format=duration:stream=codec_type",
+        "-show_entries", "format=duration:stream=codec_type,duration",
         "-of", "default=noprint_wrappers=1",
         input_path,
     ]
@@ -60,7 +60,9 @@ def get_video_info(input_path: str) -> dict:
     for line in output.splitlines():
         if line.startswith("duration="):
             try:
-                duration = float(line.split("=")[1])
+                val = float(line.split("=")[1])
+                if val > duration:
+                    duration = val
             except ValueError:
                 pass
         if line.strip() == "codec_type=audio":
