@@ -1,9 +1,3 @@
-"""
-dashboard_view.py  (optimized)
-────────────────────────────────
-Màn hình chính — thêm hiển thị GPU encoder đang dùng,
-warm-up detect_hw_encoder() ngay khi mở app để tránh delay lần đầu xuất.
-"""
 import os
 import time
 
@@ -22,8 +16,7 @@ from app.config import APP_NAME
 
 
 # ══════════════════════════════════════════════════════════
-# Worker Thread — warm-up GPU encoder detection (chạy 1 lần khi mở app)
-# Tránh delay 2-3 giây ở lần xuất đầu tiên
+# Worker Thread — warm-up GPU encoder detection
 # ══════════════════════════════════════════════════════════
 class EncoderProbeWorker(QThread):
     done = Signal(str)   # tên encoder
@@ -37,7 +30,7 @@ class EncoderProbeWorker(QThread):
 # Worker Thread — chạy ffmpeg không block UI
 # ══════════════════════════════════════════════════════════
 class ExportWorker(QThread):
-    progress = Signal(int, str)
+    progress = Signal(int, float)
     finished = Signal(str)
     error    = Signal(str)
 
@@ -54,8 +47,8 @@ class ExportWorker(QThread):
 
     def run(self):
         try:
-            def _prog(pct: int, tm: str):
-                self.progress.emit(pct, tm)
+            def _prog(pct: int, eta: float):
+                self.progress.emit(pct, eta)
 
             if self.aspect_ratio == "original":
                 out_dir = trim_segments(
@@ -67,7 +60,7 @@ class ExportWorker(QThread):
                     self.segments, on_progress=_prog
                 )
 
-            self.progress.emit(100, "")
+            self.progress.emit(100, 0.0)
             self.finished.emit(out_dir)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -133,22 +126,24 @@ class DashboardWindow(QWidget):
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(1200, 750)
 
-        self._input_path:     str | None     = None
-        self._video_duration: float          = 0.0
-        self._segment_rows:   list[SegmentRow] = []
-        self._worker:         ExportWorker | None = None
-        self._aspect_ratio:   str            = "original"
-        self._encoder_name:   str            = "đang kiểm tra..."
+        self._input_path:         str | None       = None
+        self._video_duration:     float            = 0.0
+        self._segment_rows:       list[SegmentRow] = []
+        self._worker:             ExportWorker | None = None
+        self._aspect_ratio:       str              = "original"
+        self._encoder_name:       str              = "đang kiểm tra..."
+        self._export_start_time: float             = 0.0
+        self._wall_timer:         QTimer           = QTimer(self)
 
         self._apply_styles()
         self._build_ui()
+        self._wall_timer.setInterval(1000)
+        self._wall_timer.timeout.connect(self._on_wall_tick)
 
-        # Warm-up: probe GPU encoder ngay khi mở app (background)
         self._probe_worker = EncoderProbeWorker()
         self._probe_worker.done.connect(self._on_encoder_detected)
         self._probe_worker.start()
 
-    # ── Styles ─────────────────────────────────────────────
     def _apply_styles(self):
         self.setStyleSheet("""
             QWidget {
@@ -182,7 +177,6 @@ class DashboardWindow(QWidget):
             }
         """)
 
-    # ── Build UI ───────────────────────────────────────────
     def _build_ui(self):
         root = QVBoxLayout()
         root.setContentsMargins(30, 20, 30, 20)
@@ -198,24 +192,16 @@ class DashboardWindow(QWidget):
 
         self.setLayout(root)
 
-    # ── Header ─────────────────────────────────────────────
     def _make_header(self) -> QHBoxLayout:
         h = QHBoxLayout()
-
         title = QLabel("CREATIMIC STUDIO")
-        title.setStyleSheet(
-            "font-size:26px; font-weight:900; color:#60a5fa;"
-        )
+        title.setStyleSheet("font-size:26px; font-weight:900; color:#60a5fa;")
 
-        # Badge hiển thị encoder GPU/CPU đang dùng
         self.encoder_badge = QLabel(f"⚡ {self._encoder_name}")
         self.encoder_badge.setStyleSheet("""
-            background: rgba(139,92,246,0.15);
-            color: #a78bfa;
-            border: 1px solid rgba(139,92,246,0.4);
-            border-radius: 8px;
-            padding: 4px 12px;
-            font-size: 11px;
+            background: rgba(139,92,246,0.15); color: #a78bfa;
+            border: 1px solid rgba(139,92,246,0.4); border-radius: 8px;
+            padding: 4px 12px; font-size: 11px;
         """)
 
         logout_btn = QPushButton("Đăng Xuất")
@@ -245,15 +231,11 @@ class DashboardWindow(QWidget):
         bg     = "rgba(139,92,246,0.15)" if is_gpu else "rgba(30,41,59,0.5)"
         self.encoder_badge.setText(label)
         self.encoder_badge.setStyleSheet(f"""
-            background: {bg};
-            color: {color};
-            border: 1px solid {border};
-            border-radius: 8px;
-            padding: 4px 12px;
-            font-size: 11px;
+            background: {bg}; color: {color};
+            border: 1px solid {border}; border-radius: 8px;
+            padding: 4px 12px; font-size: 11px;
         """)
 
-    # ── Cột trái: chọn file ────────────────────────────────
     def _make_left_panel(self) -> QVBoxLayout:
         v = QVBoxLayout()
         v.setSpacing(12)
@@ -267,18 +249,13 @@ class DashboardWindow(QWidget):
                 color:#94a3b8; font-size:14px; font-weight:bold;
                 background: transparent;
             }
-            QPushButton:hover {
-                border-color: #3b82f6; color:#60a5fa;
-            }
+            QPushButton:hover { border-color: #3b82f6; color:#60a5fa; }
         """)
         self.select_btn.clicked.connect(self._handle_select_file)
 
-        # Info card
         self.info_card = QFrame()
         self.info_card.setStyleSheet("""
-            QFrame {
-                background:#1e293b; border:1px solid #334155; border-radius:12px;
-            }
+            QFrame { background:#1e293b; border:1px solid #334155; border-radius:12px; }
             QLabel { border: none; }
         """)
         info_layout = QVBoxLayout()
@@ -301,16 +278,13 @@ class DashboardWindow(QWidget):
 
         v.addWidget(self.select_btn)
         v.addWidget(self.info_card)
-
         v.addLayout(self._make_ratio_selector())
         v.addStretch()
         return v
 
-    # ── Ratio selector ─────────────────────────────────────
     def _make_ratio_selector(self) -> QVBoxLayout:
         v = QVBoxLayout()
         v.setSpacing(8)
-
         lbl = QLabel("Tỉ lệ đầu ra")
         lbl.setStyleSheet("color:#cbd5e1; font-weight:bold;")
         v.addWidget(lbl)
@@ -319,11 +293,7 @@ class DashboardWindow(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        for rid, label in [
-            ("original", "🎬  Gốc"),
-            ("16:9",     "▬  16:9"),
-            ("9:16",     "▮  9:16"),
-        ]:
+        for rid, label in [("original", "🎬  Gốc"), ("16:9", "▬  16:9"), ("9:16", "▮  9:16")]:
             btn = QPushButton(label)
             btn.setProperty("ratio_id", rid)
             btn.clicked.connect(self._on_ratio_clicked)
@@ -332,15 +302,8 @@ class DashboardWindow(QWidget):
             btn_row.addWidget(btn)
 
         v.addLayout(btn_row)
-
-        self.blur_hint = QLabel(
-            "✨ Video sẽ được <b style='color:#facc15'>contain</b> "
-            "trong khung — phần trống lấp bằng "
-            "<b style='color:#facc15'>blur</b>"
-        )
-        self.blur_hint.setStyleSheet(
-            "font-size:11px; color:#64748b; border:none;"
-        )
+        self.blur_hint = QLabel("✨ Video sẽ được <b style='color:#facc15'>contain</b> lấp bằng <b style='color:#facc15'>blur</b>")
+        self.blur_hint.setStyleSheet("font-size:11px; color:#64748b; border:none;")
         self.blur_hint.setTextFormat(Qt.RichText)
         self.blur_hint.hide()
         v.addWidget(self.blur_hint)
@@ -350,21 +313,8 @@ class DashboardWindow(QWidget):
 
     def _ratio_btn_style(self, active: bool) -> str:
         if active:
-            return """
-                QPushButton {
-                    border:2px solid #3b82f6; background:rgba(59,130,246,0.1);
-                    border-radius:10px; color:#60a5fa; font-weight:bold;
-                    padding:8px; font-size:12px;
-                }
-            """
-        return """
-            QPushButton {
-                border:2px solid #334155; background:rgba(15,23,42,0.5);
-                border-radius:10px; color:#64748b;
-                padding:8px; font-size:12px;
-            }
-            QPushButton:hover { border-color:#475569; color:#94a3b8; }
-        """
+            return "QPushButton { border:2px solid #3b82f6; background:rgba(59,130,246,0.1); border-radius:10px; color:#60a5fa; font-weight:bold; padding:8px; font-size:12px; }"
+        return "QPushButton { border:2px solid #334155; background:rgba(15,23,42,0.5); border-radius:10px; color:#64748b; padding:8px; font-size:12px; } QPushButton:hover { border-color:#475569; color:#94a3b8; }"
 
     def _select_ratio(self, ratio_id: str):
         self._aspect_ratio = ratio_id
@@ -376,14 +326,11 @@ class DashboardWindow(QWidget):
         btn = self.sender()
         self._select_ratio(btn.property("ratio_id"))
 
-    # ── Cột phải: segments ─────────────────────────────────
     def _make_right_panel(self) -> QVBoxLayout:
         v = QVBoxLayout()
         v.setSpacing(12)
-
         v.addLayout(self._make_segment_count_row())
 
-        # Scroll area cho danh sách segment
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -397,30 +344,21 @@ class DashboardWindow(QWidget):
         scroll.setWidget(container)
         v.addWidget(scroll, stretch=1)
 
-        self.duration_info = QLabel("")
-        self.duration_info.setWordWrap(True)
-        v.addWidget(self.duration_info)
+        # Đã loại bỏ duration_info label tại đây theo yêu cầu
 
-        # Action button
         self.action_btn = QPushButton("🚀  BẮT ĐẦU XUẤT")
         self.action_btn.setMinimumHeight(52)
         self.action_btn.setStyleSheet("""
             QPushButton {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #3b82f6, stop:1 #8b5cf6);
-                border:none; border-radius:12px;
-                color:white; font-size:15px; font-weight:bold;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #3b82f6, stop:1 #8b5cf6);
+                border:none; border-radius:12px; color:white; font-size:15px; font-weight:bold;
             }
-            QPushButton:hover {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #2563eb, stop:1 #7c3aed);
-            }
+            QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #2563eb, stop:1 #7c3aed); }
             QPushButton:disabled { background:#1e293b; color:#475569; }
         """)
         self.action_btn.clicked.connect(self._handle_action)
         v.addWidget(self.action_btn)
 
-        # Progress
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.hide()
@@ -428,7 +366,7 @@ class DashboardWindow(QWidget):
 
         self.progress_label = QLabel("")
         self.progress_label.setAlignment(Qt.AlignCenter)
-        self.progress_label.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self.progress_label.setStyleSheet("color:#94a3b8; font-size:12px; padding:2px 0;")
         self.progress_label.hide()
         v.addWidget(self.progress_label)
 
@@ -438,14 +376,12 @@ class DashboardWindow(QWidget):
         h = QHBoxLayout()
         lbl = QLabel("Số đoạn muốn cắt:")
         lbl.setStyleSheet("color:#cbd5e1; border:none;")
-
         self.count_spin = QSpinBox()
         self.count_spin.setRange(1, 20)
         self.count_spin.setValue(2)
         self.count_spin.setFixedWidth(70)
         self.count_spin.setAlignment(Qt.AlignCenter)
         self.count_spin.valueChanged.connect(self._regenerate_segments)
-
         h.addWidget(lbl)
         h.addStretch()
         h.addWidget(self.count_spin)
@@ -458,12 +394,10 @@ class DashboardWindow(QWidget):
                 item.widget().deleteLater()
         self._segment_rows.clear()
 
-        if self._video_duration <= 0:
-            return
+        if self._video_duration <= 0: return
 
-        count   = self.count_spin.value()
+        count = self.count_spin.value()
         seg_dur = int(self._video_duration / count)
-
         for i in range(count):
             start = i * seg_dur
             dur   = (int(self._video_duration) - i * seg_dur) if i == count - 1 else seg_dur
@@ -471,114 +405,89 @@ class DashboardWindow(QWidget):
             self._segment_rows.append(row)
             self._seg_vbox.insertWidget(i, row)
 
-        self._update_duration_info()
-
-    def _update_duration_info(self):
-        total    = sum(r.get_segment().duration for r in self._segment_rows)
-        original = int(self._video_duration)
-        over     = total > original
-
-        if not self._segment_rows:
-            self.duration_info.setText("")
-            return
-
-        color_bg  = "rgba(127,29,29,0.4)"  if over else "rgba(20,83,45,0.3)"
-        color_bdr = "#dc2626"               if over else "#166534"
-        color_txt = "#f87171"               if over else "#4ade80"
-
-        self.duration_info.setStyleSheet(f"""
-            background:{color_bg}; border:1px solid {color_bdr};
-            border-radius:6px; padding:6px 10px;
-            font-size:11px; color:{color_txt};
-        """)
-        self.duration_info.setText(
-            f"Tổng đoạn: {self._fmt(total)}   |   "
-            f"Video gốc: {self._fmt(original)}"
-            + ("   ⚠️ Vượt quá!" if over else "")
-        )
-
-    # ── Handlers ───────────────────────────────────────────
     def _handle_logout(self):
         session.logout()
         from app.ui.login_view import LoginWindow
-
         def _show_login():
-            self._login_win = LoginWindow(on_success=lambda: (
-                self._login_win.close(),
-                DashboardWindow().show()
-            ))
+            self._login_win = LoginWindow(on_success=lambda: (self._login_win.close(), DashboardWindow().show()))
             self._login_win.show()
-
         self.close()
         _show_login()
 
     def _handle_select_file(self):
         path = pick_video(self)
-        if not path:
-            return
-
+        if not path: return
         self._input_path = path
         self.select_btn.setText(f"✅  {os.path.basename(path)}")
-
         info = get_video_info(path)
         self._video_duration = info.get("duration", 0.0)
-
         self.file_name_lbl.setText(os.path.basename(path))
         self.duration_lbl.setText(self._fmt(self._video_duration))
         self.info_card.show()
-
         self._regenerate_segments()
 
     def _handle_action(self):
         if not self._input_path:
             QMessageBox.warning(self, "Chưa chọn video", "Hãy chọn file video trước.")
             return
-
         segments = [r.get_segment() for r in self._segment_rows]
-        if not segments:
-            QMessageBox.warning(self, "Chưa có đoạn", "Hãy tạo ít nhất 1 đoạn.")
-            return
+        if not segments: return
 
-        total = sum(s.duration for s in segments)
-        if total > self._video_duration:
-            QMessageBox.warning(
-                self, "Vượt quá thời lượng",
-                "Tổng thời lượng các đoạn vượt quá video gốc."
-            )
-            return
-
+        self._export_start_time = time.time()
         self._set_processing(True)
-
         self._worker = ExportWorker(self._input_path, self._aspect_ratio, segments)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
-    def _on_progress(self, pct: int, timemark: str):
+    def _on_progress(self, pct: int, eta: float):
+        # Lần đầu nhận pct > 0: chuyển từ indeterminate → determinate
+        if pct > 0 and self.progress_bar.maximum() == 0:
+            self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(pct)
-        tm_display = timemark.split(".")[0] if timemark else ""
+        self._last_pct, self._last_eta = pct, eta
+        self._refresh_progress_label()
+
+    def _on_wall_tick(self):
+        self._refresh_progress_label()
+
+    def _refresh_progress_label(self):
+        elapsed = time.time() - self._export_start_time
+        pct = getattr(self, "_last_pct", 0)
+        eta = getattr(self, "_last_eta", 0.0)
+
+        if pct > 0 and eta > 0:
+            eta_text = f"   ·   còn ~{self._fmt(eta)}"
+        elif pct > 0:
+            # fallback ETA từ wall-clock
+            eta_wall = elapsed / pct * (100 - pct)
+            eta_text = f"   ·   còn ~{self._fmt(eta_wall)}"
+        else:
+            eta_text = "   ·   đang khởi động..."
+
         self.progress_label.setText(
-            f"{pct}%  {'  ⏱ ' + tm_display if tm_display else ''}"
+            f"{pct}%   ·   ⏱ đã chạy {self._fmt(elapsed)}{eta_text}"
         )
 
     def _on_finished(self, out_dir: str):
+        elapsed = time.time() - self._export_start_time
         self._set_processing(False)
+        # Đảm bảo progress bar về determinate 100% khi xong
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
+        self.progress_bar.show()
+        self.progress_label.setText(f"✅ Hoàn tất trong {self._fmt(elapsed)}")
+        self.progress_label.show()
         QMessageBox.information(
             self, "Hoàn tất!",
-            f"Xuất thành công!\nĐã lưu vào:\n{out_dir}"
+            f"Xuất thành công trong {self._fmt(elapsed)}!\nĐã lưu vào:\n{out_dir}"
         )
         import subprocess, sys
-        if sys.platform == "win32":
-            os.startfile(out_dir)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", out_dir])
-        else:
-            subprocess.Popen(["xdg-open", out_dir])
-
-        self.progress_bar.setValue(0)
-        self.progress_label.setText("")
+        if sys.platform == "win32": os.startfile(out_dir)
+        elif sys.platform == "darwin": subprocess.Popen(["open", out_dir])
+        else: subprocess.Popen(["xdg-open", out_dir])
+        QTimer.singleShot(4000, self.progress_bar.hide)
 
     def _on_error(self, msg: str):
         self._set_processing(False)
@@ -588,20 +497,24 @@ class DashboardWindow(QWidget):
         self.action_btn.setEnabled(not processing)
         self.select_btn.setEnabled(not processing)
         self.count_spin.setEnabled(not processing)
-        for btn in self._ratio_btns.values():
-            btn.setEnabled(not processing)
+        for btn in self._ratio_btns.values(): btn.setEnabled(not processing)
 
         if processing:
-            enc   = self._encoder_name
-            label = self._aspect_ratio.upper()
-            self.action_btn.setText(f"⚙️  ĐANG XỬ LÝ ({label}) — {enc}...")
+            self._last_pct = 0
+            self._last_eta = 0.0
+            self.action_btn.setText(f"⚙️  ĐANG XỬ LÝ ({self._aspect_ratio.upper()})...")
+            # Bắt đầu bằng indeterminate (range 0,0) → animated pulse
+            # Sẽ chuyển sang determinate khi _on_progress nhận pct > 0
+            self.progress_bar.setRange(0, 0)
             self.progress_bar.show()
+            self.progress_label.setText("0%   ·   ⏱ đang khởi động...")
             self.progress_label.show()
-            self.progress_bar.setValue(0)
+            self._wall_timer.start()
         else:
+            self._wall_timer.stop()
             self.action_btn.setText("🚀  BẮT ĐẦU XUẤT")
             self.progress_bar.hide()
-            self.progress_label.hide()
+            QTimer.singleShot(4000, self.progress_label.hide)
 
     @staticmethod
     def _fmt(seconds: float) -> str:

@@ -162,14 +162,20 @@ def get_video_info(input_path: str) -> dict:
 def run_ffmpeg(
     args: list[str],
     segment_duration: float = 0.0,
-    on_progress: Callable[[int, str], None] | None = None,
+    on_progress: Callable[[int, str, float], None] | None = None,
 ) -> None:
     """
     Chạy ffmpeg với args mảng (shell=False).
-    on_progress(percent: int, timemark: str) được gọi real-time.
-    Raise RuntimeError nếu ffmpeg trả về exit code != 0.
+    on_progress(percent, timemark, speed_x) được gọi real-time.
+
+    Dùng -progress pipe:2 để ffmpeg emit progress dạng key=value
+    mỗi 0.5 giây — đảm bảo % cập nhật đều kể cả lúc mới khởi động.
     """
-    full_args = [FFMPEG_BIN] + args
+    # Chèn -progress pipe:2 -stats_period 0.5 vào trước output file
+    # (phải đặt trước output, sau tất cả input/filter args)
+    progress_args = ["-progress", "pipe:2", "-stats_period", "0.5"]
+    # Tách output file (phần tử cuối) để chèn đúng vị trí
+    full_args = [FFMPEG_BIN] + args[:-1] + progress_args + [args[-1]]
 
     proc = subprocess.Popen(
         full_args,
@@ -180,17 +186,57 @@ def run_ffmpeg(
     )
 
     stderr_lines: list[str] = []
+    _last_speed  = 1.0
+    _cur_time_us = 0      # out_time_us từ -progress (microseconds)
+    _cur_speed   = 1.0
 
     for raw in proc.stderr:
-        line = raw.decode("utf-8", errors="replace")
+        line = raw.decode("utf-8", errors="replace").strip()
         stderr_lines.append(line)
 
-        if on_progress and segment_duration > 0:
-            m = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line)
-            if m:
-                elapsed = timemark_to_seconds(m.group(1))
-                pct = min(int(elapsed / segment_duration * 100), 99)
-                on_progress(pct, m.group(1))
+        if not on_progress or segment_duration <= 0:
+            continue
+
+        # -progress pipe:2 emit key=value, mỗi block kết thúc bằng progress=continue/end
+        if "=" in line:
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip()
+
+            if key == "out_time_us":
+                try:
+                    _cur_time_us = int(val)
+                except ValueError:
+                    pass
+
+            elif key == "speed":
+                # format: "3.45x" hoặc "3.45"
+                try:
+                    _cur_speed = max(float(val.rstrip("x")), 0.01)
+                except ValueError:
+                    pass
+
+            elif key == "progress":
+                # "continue" hoặc "end" — emit 1 lần mỗi stats_period
+                elapsed_sec = _cur_time_us / 1_000_000
+                pct = min(int(elapsed_sec / segment_duration * 100), 99)
+                timemark = _fmt_seconds(elapsed_sec)
+                on_progress(pct, timemark, _cur_speed)
+
+        else:
+            # Fallback: parse stderr thường (time= / speed=) khi không có -progress
+            m_speed = re.search(r"speed=\s*([\d.]+)x?", line)
+            if m_speed:
+                try:
+                    _last_speed = max(float(m_speed.group(1)), 0.01)
+                except ValueError:
+                    pass
+
+            m_time = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line)
+            if m_time:
+                elapsed = timemark_to_seconds(m_time.group(1))
+                pct     = min(int(elapsed / segment_duration * 100), 99)
+                on_progress(pct, m_time.group(1), _last_speed)
 
     proc.wait()
 
@@ -199,3 +245,12 @@ def run_ffmpeg(
         raise RuntimeError(
             f"FFmpeg lỗi (exit {proc.returncode}):\n{stderr_text}"
         )
+
+
+def _fmt_seconds(seconds: float) -> str:
+    """float seconds → 'HH:MM:SS.xx' cho timemark display."""
+    total = int(seconds)
+    h, r  = divmod(total, 3600)
+    m, s  = divmod(r, 60)
+    frac  = int((seconds - total) * 100)
+    return f"{h:02d}:{m:02d}:{s:02d}.{frac:02d}"

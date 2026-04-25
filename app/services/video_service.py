@@ -51,26 +51,48 @@ class Segment:
 # Gộp % của N worker → 1 callback duy nhất lên UI
 # ──────────────────────────────────────────────────────────
 class _ProgressMerger:
+    """
+    Gộp % của N worker → 1 callback duy nhất lên UI.
+
+    Tính % theo trọng số duration từng segment:
+      done_seconds = Σ (pct_i / 100 × duration_i)
+      overall_pct  = done_seconds / total_duration × 100
+
+    Tính ETA thực từ speed ffmpeg:
+      remaining_video = total_duration - done_seconds
+      eta_seconds     = remaining_video / avg_speed_x
+      → ETA phản ánh tốc độ encode thực tế (GPU/CPU), không phải duration video
+    """
     def __init__(
         self,
-        total: int,
-        on_progress: Callable[[int, str], None] | None,
+        segments: list,
+        on_progress: Callable[[int, float], None] | None,
     ):
-        self._lock     = threading.Lock()
-        self._total    = total
-        self._pcts     = [0] * total          # % hiện tại của từng segment
-        self._marks    = [""] * total         # timemark mới nhất của từng segment
-        self._callback = on_progress
+        self._lock           = threading.Lock()
+        self._durations      = [s.duration for s in segments]
+        self._total_duration = sum(self._durations) or 1.0
+        self._pcts           = [0.0] * len(segments)
+        self._speeds         = [1.0] * len(segments)  # speed_x từng worker
+        self._callback       = on_progress
 
-    def update(self, idx: int, pct: int, timemark: str):
+    def update(self, idx: int, pct: int, speed_x: float) -> None:
         with self._lock:
-            self._pcts[idx]  = pct
-            self._marks[idx] = timemark
+            self._pcts[idx]   = float(pct)
+            self._speeds[idx] = max(speed_x, 0.01)
             if self._callback:
-                overall = int(sum(self._pcts) / self._total)
-                # Lấy timemark của segment đang chạy xa nhất
-                best_mark = max(self._marks, key=lambda m: m or "")
-                self._callback(min(overall, 99), best_mark)
+                # % tổng weighted by duration
+                done_seconds = sum(
+                    (self._pcts[i] / 100.0) * self._durations[i]
+                    for i in range(len(self._durations))
+                )
+                overall_pct = int(done_seconds / self._total_duration * 100)
+
+                # ETA = phần video còn lại / tốc độ encode trung bình
+                avg_speed       = sum(self._speeds) / len(self._speeds)
+                remaining_video = self._total_duration - done_seconds
+                eta_seconds     = remaining_video / avg_speed
+
+                self._callback(min(overall_pct, 99), max(eta_seconds, 0.0))
 
 
 # ──────────────────────────────────────────────────────────
@@ -79,17 +101,18 @@ class _ProgressMerger:
 def trim_segments(
     input_path: str,
     segments: list[Segment],
-    on_progress: Callable[[int, str], None] | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ) -> str:
     """
     Cắt nhiều đoạn song song bằng stream copy.
+    on_progress(pct: int, eta_seconds: float)
     Trả về đường dẫn thư mục output.
     """
     output_dir = os.path.join(DOWNLOADS_DIR, "Creatimic_Trims")
     os.makedirs(output_dir, exist_ok=True)
 
     total   = len(segments)
-    merger  = _ProgressMerger(total, on_progress)
+    merger  = _ProgressMerger(segments, on_progress)
     ts_base = int(time.time())
 
     def _cut_one(idx: int, seg: Segment) -> None:
@@ -109,7 +132,7 @@ def trim_segments(
         run_ffmpeg(
             args,
             segment_duration=seg.duration,
-            on_progress=lambda pct, tm: merger.update(idx, pct, tm),
+            on_progress=lambda pct, tm, spd: merger.update(idx, pct, spd),
         )
 
     # stream copy nhẹ → có thể chạy nhiều worker hơn
@@ -120,7 +143,7 @@ def trim_segments(
             fut.result()   # re-raise nếu có lỗi
 
     if on_progress:
-        on_progress(100, "")
+        on_progress(100, 0.0)
     return output_dir
 
 
@@ -129,18 +152,13 @@ def trim_segments(
 # ──────────────────────────────────────────────────────────
 def export_blur(
     input_path: str,
-    aspect_ratio: str,          # "16:9" hoặc "9:16"
+    aspect_ratio: str,
     segments: list[Segment],
-    on_progress: Callable[[int, str], None] | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ) -> str:
     """
     Xuất video với blur background — song song + GPU encoder tự động.
-
-    Tối ưu:
-      • filter_complex tính 1 lần, reuse cho mọi segment
-      • GPU encoder (nvenc/videotoolbox/amf) thay libx264 → 5–20× nhanh hơn
-      • N segments chạy đồng thời trên ThreadPoolExecutor
-      • Nếu không có GPU → fallback libx264 với thread tối ưu
+    on_progress(pct: int, eta_seconds: float)
     """
     out_w = 1080 if aspect_ratio == "9:16" else 1920
     out_h = 1920 if aspect_ratio == "9:16" else 1080
@@ -174,7 +192,7 @@ def export_blur(
     os.makedirs(output_dir, exist_ok=True)
 
     total  = len(segments)
-    merger = _ProgressMerger(total, on_progress)
+    merger = _ProgressMerger(segments, on_progress)
 
     def _encode_one(idx: int, seg: Segment) -> None:
         out_path = os.path.join(output_dir, f"segment_{idx + 1}.mp4")
@@ -210,7 +228,7 @@ def export_blur(
         run_ffmpeg(
             args,
             segment_duration=seg.duration,
-            on_progress=lambda pct, tm: merger.update(idx, pct, tm),
+            on_progress=lambda pct, tm, spd: merger.update(idx, pct, spd),
         )
 
     # GPU có thể handle nhiều stream song song hơn CPU
@@ -229,5 +247,5 @@ def export_blur(
         raise RuntimeError("\n---\n".join(errors))
 
     if on_progress:
-        on_progress(100, "")
+        on_progress(100, 0.0)
     return output_dir
